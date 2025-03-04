@@ -102,6 +102,7 @@ class LatentBrownianBridgeModel(BrownianBridgeModel):
     @torch.no_grad()
     def sample(self, x_cond, clip_denoised=False, sample_mid_step=False):
         x_cond_latent = self.encode(x_cond, cond=True)
+        pre_bbdm_latent = x_cond_latent
         if sample_mid_step:
             temp, one_step_temp = self.p_sample_loop(y=x_cond_latent,
                                                      context=self.get_cond_stage_context(x_cond),
@@ -128,8 +129,9 @@ class LatentBrownianBridgeModel(BrownianBridgeModel):
                                       clip_denoised=clip_denoised,
                                       sample_mid_step=sample_mid_step)
             x_latent = temp
+            post_bbdm_latent = x_latent
             out = self.decode(x_latent, cond=False)
-            return out
+            return out, pre_bbdm_latent, post_bbdm_latent
 
     @torch.no_grad()
     def sample_vqgan(self, x):
