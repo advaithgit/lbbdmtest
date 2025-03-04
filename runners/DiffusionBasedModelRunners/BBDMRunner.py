@@ -11,7 +11,8 @@ from runners.DiffusionBasedModelRunners.DiffusionBaseRunner import DiffusionBase
 from runners.utils import weights_init, get_optimizer, get_dataset, make_dir, get_image_grid, save_single_image
 from tqdm.autonotebook import tqdm
 from torchsummary import summary
-
+import numpy as np
+import matplotlib.pyplot as plt  # This is the correct import
 
 @Registers.runners.register_with_name('BBDMRunner')
 class BBDMRunner(DiffusionBaseRunner):
@@ -177,49 +178,86 @@ class BBDMRunner(DiffusionBaseRunner):
 
     @torch.no_grad()
     def sample(self, net, batch, sample_path, stage='train'):
-        sample_path = make_dir(os.path.join(sample_path, f'{stage}_sample'))
-        reverse_sample_path = make_dir(os.path.join(sample_path, 'reverse_sample'))
-        reverse_one_step_path = make_dir(os.path.join(sample_path, 'reverse_one_step_samples'))
+        
+      sample_path = make_dir(os.path.join(sample_path, f'{stage}_sample'))
+      reverse_sample_path = make_dir(os.path.join(sample_path, 'reverse_sample'))
+      reverse_one_step_path = make_dir(os.path.join(sample_path, 'reverse_one_step_samples'))
+      latent_path = make_dir(os.path.join(sample_path, 'latent_vis'))
 
-        print(sample_path)
+      (x, x_name), (x_cond, x_cond_name) = batch
+      batch_size = x.shape[0] if x.shape[0] < 4 else 4
+      x = x[0:batch_size].to(self.config.training.device[0])
+      x_cond = x_cond[0:batch_size].to(self.config.training.device[0])
+      grid_size = 4
 
-        (x, x_name), (x_cond, x_cond_name) = batch
+      # Get sample and latents
+      sample, pre_bbdm_latent, post_bbdm_latent = net.sample(x_cond, clip_denoised=self.config.testing.clip_denoised)
+      sample = sample.to('cpu')
 
-        batch_size = x.shape[0] if x.shape[0] < 4 else 4
+      # Regular image saving (as before)
+      image_grid = get_image_grid(sample, grid_size, to_normal=self.config.data.dataset_config.to_normal)
+      im = Image.fromarray(image_grid)
+      im.save(os.path.join(sample_path, 'skip_sample.png'))
+      if stage != 'test':
+          self.writer.add_image(f'{stage}_skip_sample', image_grid, self.global_step, dataformats='HWC')
 
-        x = x[0:batch_size].to(self.config.training.device[0])
-        x_cond = x_cond[0:batch_size].to(self.config.training.device[0])
+      # Save condition and ground truth (as before)
+      image_grid = get_image_grid(x_cond.to('cpu'), grid_size, to_normal=self.config.data.dataset_config.to_normal)
+      im = Image.fromarray(image_grid)
+      im.save(os.path.join(sample_path, 'condition.png'))
+      if stage != 'test':
+          self.writer.add_image(f'{stage}_condition', image_grid, self.global_step, dataformats='HWC')
 
-        grid_size = 4
+      image_grid = get_image_grid(x.to('cpu'), grid_size, to_normal=self.config.data.dataset_config.to_normal)
+      im = Image.fromarray(image_grid)
+      im.save(os.path.join(sample_path, 'ground_truth.png'))
+      if stage != 'test':
+          self.writer.add_image(f'{stage}_ground_truth', image_grid, self.global_step, dataformats='HWC')
 
-        # samples, one_step_samples = net.sample(x_cond,
-        #                                        clip_denoised=self.config.testing.clip_denoised,
-        #                                        sample_mid_step=True)
-        # self.save_images(samples, reverse_sample_path, grid_size, save_interval=200,
-        #                  writer_tag=f'{stage}_sample' if stage != 'test' else None)
-        #
-        # self.save_images(one_step_samples, reverse_one_step_path, grid_size, save_interval=200,
-        #                  writer_tag=f'{stage}_one_step_sample' if stage != 'test' else None)
-        #
-        # sample = samples[-1]
-        sample = net.sample(x_cond, clip_denoised=self.config.testing.clip_denoised).to('cpu')
-        image_grid = get_image_grid(sample, grid_size, to_normal=self.config.data.dataset_config.to_normal)
-        im = Image.fromarray(image_grid)
-        im.save(os.path.join(sample_path, 'skip_sample.png'))
-        if stage != 'test':
-            self.writer.add_image(f'{stage}_skip_sample', image_grid, self.global_step, dataformats='HWC')
+      # Latent visualization in 1x4 grid format
+      CHANNEL_TO_VIS = 50
 
-        image_grid = get_image_grid(x_cond.to('cpu'), grid_size, to_normal=self.config.data.dataset_config.to_normal)
-        im = Image.fromarray(image_grid)
-        im.save(os.path.join(sample_path, 'condition.png'))
-        if stage != 'test':
-            self.writer.add_image(f'{stage}_condition', image_grid, self.global_step, dataformats='HWC')
+      def create_latent_grid(latents, channel):
+          # Take the specified channel from each image's latent
+          latent_maps = latents[:batch_size, channel].cpu().numpy()
+        
+          # Get dimensions of single latent map
+          h, w = latent_maps[0].shape
+        
+          # Create a 1x4 grid
+          grid = np.zeros((h, w * batch_size))
+        
+          # Fill the grid horizontally
+          for idx in range(batch_size):
+              grid[:, idx * w:(idx + 1) * w] = latent_maps[idx]
+        
+          return grid
 
-        image_grid = get_image_grid(x.to('cpu'), grid_size, to_normal=self.config.data.dataset_config.to_normal)
-        im = Image.fromarray(image_grid)
-        im.save(os.path.join(sample_path, 'ground_truth.png'))
-        if stage != 'test':
-            self.writer.add_image(f'{stage}_ground_truth', image_grid, self.global_step, dataformats='HWC')
+      # Save pre-BBDM latent grid
+      pre_bbdm_grid = create_latent_grid(pre_bbdm_latent, CHANNEL_TO_VIS)
+      plt.figure(figsize=(20, 5))  # Wide figure for 1x4 layout
+      plt.imshow(pre_bbdm_grid, cmap='gray')
+      plt.axis('off')
+      plt.savefig(os.path.join(latent_path, 'pre_bbdm_latent_grid.png'), bbox_inches='tight')
+      plt.close()
+      if stage != 'test':
+          self.writer.add_image(f'{stage}_pre_bbdm_latent_grid', 
+                              pre_bbdm_grid[None, :, :], 
+                              self.global_step, 
+                              dataformats='CHW')
+
+      # Save post-BBDM latent grid
+      post_bbdm_grid = create_latent_grid(post_bbdm_latent, CHANNEL_TO_VIS)
+      plt.figure(figsize=(20, 5))  # Wide figure for 1x4 layout
+      plt.imshow(post_bbdm_grid, cmap='gray')
+      plt.axis('off')
+      plt.savefig(os.path.join(latent_path, 'post_bbdm_latent_grid.png'), bbox_inches='tight')
+      plt.close()
+      if stage != 'test':
+          self.writer.add_image(f'{stage}_post_bbdm_latent_grid', 
+                              post_bbdm_grid[None, :, :], 
+                              self.global_step, 
+                              dataformats='CHW')
 
     @torch.no_grad()
     def sample_to_eval(self, net, test_loader, sample_path):
